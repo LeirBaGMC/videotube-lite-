@@ -1,0 +1,75 @@
+name: Publicar VideoTube Lite
+
+# Este archivo se activa cuando el CONTENIDO de lite es la raíz del repositorio.
+on:
+  push:
+    branches: [main]
+    paths: ['site/**', '.github/workflows/deploy.yml']
+  pull_request:
+    branches: [main]
+    paths: ['site/**', '.github/workflows/deploy.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: videotube-lite-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Comprobar los archivos de la página
+        run: |
+          test -s site/index.html
+          test -s site/styles.css
+          grep -q 'href="styles.css"' site/index.html
+
+  publicar:
+    needs: validar
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      S3_BUCKET_NAME: ${{ vars.S3_BUCKET_NAME }}
+      WEBSITE_URL: ${{ vars.WEBSITE_URL }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Comprobar las variables de GitHub
+        run: |
+          : "${AWS_REGION:?Configura AWS_REGION}"
+          : "${AWS_ROLE_ARN:?Configura AWS_ROLE_ARN}"
+          : "${S3_BUCKET_NAME:?Configura S3_BUCKET_NAME}"
+          : "${WEBSITE_URL:?Configura WEBSITE_URL}"
+      - name: Obtener credenciales temporales de AWS con OIDC
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: videotube-lite-${{ github.run_id }}
+      - name: Sincronizar la página con S3
+        # --delete elimina del bucket los archivos ausentes en site/.
+        # Usa un bucket dedicado exclusivamente a esta página.
+        run: aws s3 sync site/ "s3://$S3_BUCKET_NAME/" --delete --cache-control "no-cache,max-age=0" --only-show-errors
+      - name: Comprobar el HTML y CSS publicados
+        run: |
+          for file in index.html styles.css; do
+            curl --fail --silent --show-error --retry 3 --retry-all-errors \
+              --connect-timeout 10 --max-time 30 \
+              "${WEBSITE_URL%/}/$file?commit=$GITHUB_SHA" -o "$RUNNER_TEMP/$file"
+            cmp "site/$file" "$RUNNER_TEMP/$file"
+          done
+          printf '### Página publicada\n[%s](%s)\n\nCommit: `%s`\n' \
+            "$WEBSITE_URL" "$WEBSITE_URL" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"

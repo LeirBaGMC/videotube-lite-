@@ -1,0 +1,107 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: VideoTube Lite - static S3 website and GitHub OIDC deployment role.
+
+Parameters:
+  ExistingBucketName:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+    Description: Existing dedicated website bucket. Empty creates a new bucket.
+  ExistingOidcProviderArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^arn:aws:iam::[0-9]{12}:oidc-provider/token.actions.githubusercontent.com$'
+    Description: Existing GitHub OIDC provider. Empty creates one.
+  GitHubSubject:
+    Type: String
+    AllowedPattern: '^repo:[A-Za-z0-9_.-]+(@[0-9]+)?/[A-Za-z0-9_.-]+(@[0-9]+)?:ref:refs/heads/main$'
+    Description: Exact GitHub OIDC subject for the main branch of the class repository.
+
+Conditions:
+  CreateBucket: !Equals [!Ref ExistingBucketName, '']
+  CreateOidcProvider: !Equals [!Ref ExistingOidcProviderArn, '']
+
+Resources:
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateBucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: false
+        RestrictPublicBuckets: false
+      WebsiteConfiguration:
+        IndexDocument: index.html
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: CreateBucket
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PublicReadWebsite
+            Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOidcProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+  GitHubDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [CreateOidcProvider, !Ref GitHubOidcProvider, !Ref ExistingOidcProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Ref GitHubSubject
+      Policies:
+        - PolicyName: PublishWebsite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ListWebsiteFiles
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub
+                  - 'arn:${AWS::Partition}:s3:::${Bucket}'
+                  - Bucket: !If [CreateBucket, !Ref FrontendBucket, !Ref ExistingBucketName]
+              - Sid: UpdateWebsiteFiles
+                Effect: Allow
+                Action: [s3:PutObject, s3:DeleteObject]
+                Resource: !Sub
+                  - 'arn:${AWS::Partition}:s3:::${Bucket}/*'
+                  - Bucket: !If [CreateBucket, !Ref FrontendBucket, !Ref ExistingBucketName]
+
+Outputs:
+  AWSRoleArn:
+    Value: !GetAtt GitHubDeployRole.Arn
+  AWSRegion:
+    Value: !Ref AWS::Region
+  S3BucketName:
+    Value: !If [CreateBucket, !Ref FrontendBucket, !Ref ExistingBucketName]
+  WebsiteURL:
+    Condition: CreateBucket
+    Value: !GetAtt FrontendBucket.WebsiteURL
